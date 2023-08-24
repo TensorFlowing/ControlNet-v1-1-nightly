@@ -33,11 +33,14 @@ def process(input_image_and_mask, prompt, a_prompt, n_prompt, num_samples, image
         mask_pixel = cv2.resize(input_mask[:, :, 0], (W, H), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
         mask_pixel = cv2.GaussianBlur(mask_pixel, (0, 0), mask_blur)
 
+        # interesting: a mask for lalent images
         mask_latent = cv2.resize(mask_pixel, (W // 8, H // 8), interpolation=cv2.INTER_AREA)
 
+        # detected_map: original image with masked pixel removed
         detected_map = img_raw.copy()
         detected_map[mask_pixel > 0.5] = - 255.0
-
+        
+        # detected_map => control
         control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
         control = torch.stack([control for _ in range(num_samples)], dim=0)
         control = einops.rearrange(control, 'b h w c -> b c h w').clone()
@@ -60,6 +63,7 @@ def process(input_image_and_mask, prompt, a_prompt, n_prompt, num_samples, image
         if config.save_memory:
             model.low_vram_shift(is_diffusing=False)
 
+        # key! control parameters
         cond = {"c_concat": [control], "c_crossattn": [model.get_learned_conditioning([prompt + ', ' + a_prompt] * num_samples)]}
         un_cond = {"c_concat": None if guess_mode else [control], "c_crossattn": [model.get_learned_conditioning([n_prompt] * num_samples)]}
         shape = (4, H // 8, W // 8)
@@ -68,6 +72,8 @@ def process(input_image_and_mask, prompt, a_prompt, n_prompt, num_samples, image
             model.low_vram_shift(is_diffusing=False)
 
         ddim_sampler.make_schedule(ddim_steps, ddim_eta=eta, verbose=True)
+
+        # convert input from pixel space to latent space
         x0 = model.get_first_stage_encoding(model.encode_first_stage(x0))
 
         if config.save_memory:
@@ -86,6 +92,8 @@ def process(input_image_and_mask, prompt, a_prompt, n_prompt, num_samples, image
 
         x_samples = model.decode_first_stage(samples)
         x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().astype(np.float32)
+
+        # blending to preserve the pixels outside inpainting mask
         x_samples = x_samples * mask_pixel_batched + img_pixel_batched * (1.0 - mask_pixel_batched)
 
         results = [x_samples[i].clip(0, 255).astype(np.uint8) for i in range(num_samples)]
